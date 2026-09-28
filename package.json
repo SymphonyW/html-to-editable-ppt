@@ -1,0 +1,19 @@
+{
+  "name": "html-to-editable-ppt-skill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Convert HTML slide decks into editable PowerPoint presentations with native text/shapes where possible.",
+  "scripts": {
+    "convert": "node scripts/convert.mjs",
+    "check": "node scripts/convert.mjs --help",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.62.0-alpha-2026-07-14",
+    "pptxgenjs": "^3.12.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
