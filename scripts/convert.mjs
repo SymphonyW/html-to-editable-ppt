@@ -270,7 +270,7 @@ async function detectSlideCount(page, selector) {
 }
 
 async function extractSlide(page, slideIndex, selector) {
-  return page.evaluate(({ slideIndex, selector }) => {
+  return page.evaluate(async ({ slideIndex, selector }) => {
     function getSlides() {
       if (selector) {
         const explicit = [...document.querySelectorAll(selector)];
@@ -424,7 +424,7 @@ async function extractSlide(page, slideIndex, selector) {
     }
 
     function directOrSimpleText(el) {
-      const allowed = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'LI', 'BLOCKQUOTE', 'PRE', 'CODE', 'TD', 'TH', 'FIGCAPTION', 'CAPTION', 'BUTTON', 'A', 'LABEL', 'DIV', 'SPAN']);
+      const allowed = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'LI', 'BLOCKQUOTE', 'PRE', 'CODE', 'TD', 'TH', 'FIGCAPTION', 'CAPTION', 'BUTTON', 'A', 'LABEL', 'DIV', 'SPAN', 'B', 'STRONG', 'EM', 'I', 'U', 'S', 'SMALL', 'MARK', 'SUB', 'SUP', 'FONT']);
       if (!allowed.has(el.tagName)) return false;
       // A container with block-level children is a layout node, not a text
       // node: merging it would stack distinct children into one text box and
@@ -458,9 +458,10 @@ async function extractSlide(page, slideIndex, selector) {
         if (last && !last.br && sameStyle(last.style, style)) last.text += text;
         else runs.push({ text, style });
       }
+      let lastRect = null;
       function walk(node, style) {
         if (node.nodeType === Node.TEXT_NODE) {
-          push(node.nodeValue.replace(/\u00a0/g, ' ').replace(/\s+/g, ' '), style);
+          push(node.nodeValue.replace(/ /g, ' ').replace(/\s+/g, ' '), style);
           return;
         }
         if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -468,9 +469,27 @@ async function extractSlide(page, slideIndex, selector) {
         if (cs.display === 'none' || cs.visibility === 'hidden' || Number.parseFloat(cs.opacity || '1') < 0.05) return;
         const st = styleOf(node);
         if (node.tagName === 'BR') { runs.push({ text: '\n', style: st, br: true }); return; }
+        // Margin / flex-gap separation between inline runs is visible in the
+        // browser but invisible in concatenated text; approximate with a space.
+        if (runs.length && !runs[runs.length - 1].br && !/\s$/.test(runs[runs.length - 1].text)) {
+          const ml = Number.parseFloat(cs.marginLeft || '0') || 0;
+          let gap = 0;
+          const pe = node.parentElement;
+          if (pe && /flex/.test(getComputedStyle(pe).display)) {
+            gap = Number.parseFloat(getComputedStyle(pe).columnGap || '0') || 0;
+          }
+          if (ml + gap > 3) push(' ', style);
+        }
         // innerText breaks lines around block-level descendants; mirror that
         // so the runs' text stays aligned with the container's innerText.
-        const blockBreak = node !== el && /^(block|flex|grid|table|list-item|flow-root)/.test(cs.display);
+        // Flex items are blockified by CSS (inline-block computes to block)
+        // yet still render on the same line — compare rects with the element
+        // walked just before to tell a real line break from blockification.
+        const rect = node.getBoundingClientRect();
+        const sameLine = lastRect && rect.height > 0
+          && Math.abs(rect.top - lastRect.top) < Math.max(2, rect.height * 0.5);
+        const blockBreak = node !== el && /^(block|flex|grid|table|list-item|flow-root)/.test(cs.display) && !sameLine;
+        lastRect = rect;
         if (blockBreak && runs.length && !runs[runs.length - 1].br) runs.push({ text: '\n', style: st, br: true });
         for (const child of node.childNodes) walk(child, st);
         if (blockBreak) runs.push({ text: '\n', style: st, br: true });
@@ -504,6 +523,16 @@ async function extractSlide(page, slideIndex, selector) {
 
     const slides = getSlides();
     const target = slides[Math.min(slideIndex, slides.length - 1)] || document.body;
+    // Decks that compute fit-to-slide transforms on activation (e.g. a global
+    // goToSlide) must be activated through their own navigation hook first,
+    // otherwise JS-built layouts are measured in their pre-fit state.
+    if (typeof window.goToSlide === 'function') {
+      try {
+        window.goToSlide(slideIndex + 1);
+        // fit-to-slide transforms are often applied from rAF/setTimeout hooks
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      } catch { /* not a real hook */ }
+    }
     forceSlideVisible(target, slides);
 
     const slideRect = target.getBoundingClientRect();
@@ -624,6 +653,69 @@ async function extractSlide(page, slideIndex, selector) {
       });
     }
 
+    // Text nodes sitting directly inside a layout node (mixed with block-level
+    // children) belong to no selected text container — extract them via Range
+    // so they are not dropped.
+    for (const el of all) {
+      if (el === target || selectedText.has(el) || hasTextAncestor(el, selectedText)) continue;
+      if (!visible(el, slideRect)) continue;
+      const textNodes = [...el.childNodes].filter(
+        (n) => n.nodeType === Node.TEXT_NODE && n.nodeValue.replace(/ /g, ' ').trim(),
+      );
+      if (!textNodes.length) continue;
+      const range = document.createRange();
+      let rect = null;
+      for (const tn of textNodes) {
+        range.selectNodeContents(tn);
+        const r = range.getBoundingClientRect();
+        if (r.width < 0.5 || r.height < 0.5) continue;
+        rect = rect
+          ? {
+              left: Math.min(rect.left, r.left), top: Math.min(rect.top, r.top),
+              right: Math.max(rect.right, r.right), bottom: Math.max(rect.bottom, r.bottom),
+            }
+          : { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+      }
+      if (!rect) continue;
+      const style = getComputedStyle(el);
+      const text = textNodes.map((n) => n.nodeValue.replace(/ /g, ' ').replace(/\s+/g, ' ')).join(' ').trim();
+      if (!text) continue;
+      const fontSizePx = Number.parseFloat(style.fontSize || '16');
+      const lineHeightPx = Number.parseFloat(style.lineHeight) || fontSizePx * 1.2;
+      const h = rect.bottom - rect.top;
+      objects.push({
+        kind: 'text',
+        box: { x: rect.left - slideRect.left, y: rect.top - slideRect.top, w: rect.right - rect.left, h },
+        z: zValue(style),
+        order: (domOrder.get(el) ?? 0) + 0.05,
+        text,
+        runs: [{
+          text,
+          style: {
+            color: effectiveTextColor(style), fontFamily: style.fontFamily, fontSize: fontSizePx,
+            fontWeight: style.fontWeight, fontStyle: style.fontStyle,
+            textDecoration: style.textDecorationLine || style.textDecoration,
+          },
+        }],
+        href: null,
+        singleLine: h <= lineHeightPx * 1.7,
+        style: {
+          color: effectiveTextColor(style),
+          fontFamily: style.fontFamily,
+          fontSize: fontSizePx,
+          fontWeight: style.fontWeight,
+          fontStyle: style.fontStyle,
+          textDecoration: style.textDecorationLine || style.textDecoration,
+          textAlign: style.textAlign,
+          lineHeight: style.lineHeight,
+          lineHeightPx,
+          letterSpacing: style.letterSpacing,
+          opacity: Number.parseFloat(style.opacity || '1'),
+          whiteSpace: style.whiteSpace,
+        },
+      });
+    }
+
     // Raster images remain separate PowerPoint image objects.
     for (const el of target.querySelectorAll('img')) {
       if (!visible(el, slideRect)) continue;
@@ -644,6 +736,11 @@ async function extractSlide(page, slideIndex, selector) {
       const style = getComputedStyle(el);
       const clone = el.cloneNode(true);
       if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      // PowerPoint sizes SVG images by their intrinsic width/height attributes;
+      // pin them to the on-screen box so CSS-sized SVGs don't render oversized.
+      const svgRect = el.getBoundingClientRect();
+      clone.setAttribute('width', String(Math.max(1, Math.round(svgRect.width))));
+      clone.setAttribute('height', String(Math.max(1, Math.round(svgRect.height))));
       objects.push({
         kind: 'svg',
         box: box(el, slideRect),
@@ -778,7 +875,11 @@ function addText(slide, obj, box) {
     }
   }
   const richText = (obj.runs || []).map((r) => r.text).join('').trim();
-  const useRich = rich.length >= 1 && richText && normalizedText(richText) === text;
+  // innerText inserts line breaks around CSS boxes (e.g. inline-flex) that the
+  // run walker deliberately keeps inline, so compare with whitespace stripped:
+  // a whitespace-only mismatch must not fall back to the stacked innerText.
+  const useRich = rich.length >= 1 && richText
+    && (normalizedText(richText) === text || richText.replace(/\s+/g, '') === text.replace(/\s+/g, ''));
   if (process.env.DEBUG_RUNS && text.includes('六维度')) {
     console.log('DEBUG', JSON.stringify({ text, richText: normalizedText(richText), runs: obj.runs, useRich }, null, 1));
   }

@@ -46,3 +46,13 @@ Reveal.js, Slidev, Marp and other frameworks may apply runtime transforms. The c
 - Gradient fills become solid average colors, not true gradient fills; fix manually in PowerPoint where it matters.
 - Elements whose only border is a left/right/bottom accent bar lose that accent.
 - Small pill/badge widths and anti-aliasing differ slightly from the browser render.
+
+## Field-reported edge cases (2026-09 session, see troubleshooting.md for recipes)
+
+- SVG charts: embedded `svgBlip` re-encodes can mismatch internal size/aspect (letterboxing squashes geometry vs surrounding native text boxes), and PNG fallbacks may be tiny shared placeholders that WPS actually renders. Safest fix: per-pic PNG cropped from a live render, svgBlip dropped, labels kept as native text boxes.
+- SVG text is extracted as native text boxes *in addition to* being baked into the embedded SVG — labels render twice unless stripped or the render hides `svg text`.
+- Charts drawn by slide-activation animations (sankey flow-in, dash-draw): a forced all-visible render captures the pre-animation state. Activate the slide in a live session, wait, and bake the diagram region as one image; per-element offsets on such slides are often inconsistent.
+- CSS `::before`/`::after` pseudo-elements (status dots, chip badges) are invisible to the DOM walk and must be re-added as shapes.
+- Inline styled chips (`tag`, `@mentions`) can end up merged into the parent line's runs while their capsule shapes stay empty — split runs into their own positioned text boxes.
+- Decks whose viewer scales the stage: element screenshots are stage-scaled — compute crop scale from actual PNG size / design width, not from `deviceScaleFactor`.
+- WPS rewrites the package on open (media renames, occasionally drops a pic+media) and intermittently fails to start its COM server; re-read rels and verify edits survived after any WPS session.

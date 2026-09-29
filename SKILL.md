@@ -111,6 +111,20 @@ or:
 - Ignore hidden elements (`display:none`, `visibility:hidden`, near-zero opacity, zero-size boxes).
 - Ignore scripts, styles, metadata and accessibility-only text.
 
+## Post-conversion QA checklist (field-tested)
+
+On decks with SVG charts, chip/badge pseudo-elements, or activation animations, run this checklist after `convert.mjs` — every item was hit on a real 26-page deck; detailed recipes are in `references/troubleshooting.md` ("Field lessons"):
+
+1. **Fonts**: if a single family is required, rewrite `typeface="..."` in all XML parts; verify by listing the remaining typefaces.
+2. **Duplicated chart labels**: the converter bakes SVG text into the embedded chart *and* extracts it as native text boxes. Strip duplicated `<text>` from the SVG media, or bake a text-hidden render.
+3. **Chart geometry in WPS/old PowerPoint**: check PNG fallbacks — they may be tiny shared placeholders, and re-encoded SVG aspect can mismatch the pic extent (letterboxing squashes geometry). Safest fix: per-pic PNG cropped from a live render at the chart's measured DOM rect, svgBlip dropped, pic extent set to that rect, labels kept as native text boxes.
+4. **Activation animations** (sankey flow-in, dash-draw): a forced all-visible render captures the pre-animation state with content translated off-canvas. Activate the slide in a live session, wait for the animation, and bake the diagram region as one image.
+5. **Crop scale**: stage-scaled decks make element screenshots ≠ design pixels (e.g. 1166x656 at 1x, 2332x1312 at DSF2 for a 1280x720 design). Compute crop scale from actual PNG size / design width.
+6. **Pseudo-elements** (`::before` dots/badges): invisible to the DOM walk — re-add as small shapes at positions measured from an HTML render (center-group chips put the dot ~20-30 px in, not at left padding).
+7. **Inline chips merged into line runs**: capsule shapes empty, tag text off-capsule — split each tag's run into its own centered text box at the tag's DOM rect.
+8. **WPS**: renders PNG fallbacks (not svgBlip); rewrites the package on open (media renames, may drop a pic); COM server can fail intermittently; the file locks while the user has it open. Re-read rels before patching media; write versioned copies when locked.
+9. **Verify with expectations, not just diff**: whole-slide mean diff finds anomalies but cannot prove correctness — use target-color pixel counts at known positions and live-capture ground truth; treat ±2 diff swings on animated slides as noise.
+
 ## Known limitations
 
 Read `references/limitations.md` before claiming pixel-perfect conversion.
